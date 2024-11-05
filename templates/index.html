@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Speech Analysis Dashboard</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        /* ... (keep existing styles) ... */
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.5s ease-in-out;
+        }
+        .progress-text {
+            text-align: center;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Speech Analysis Dashboard</h1>
+        
+        <div class="upload-section">
+            <h2>Upload Speech File</h2>
+            <form id="uploadForm">
+                <input type="file" id="speechFile" accept=".mp3,.wav" required>
+                <button type="submit">Analyze Speech</button>
+            </form>
+            <div id="fileInfo"></div>
+        </div>
+
+        <div class="loading" id="loadingIndicator" style="display: none;">
+            <div>Analyzing speech... This may take a few minutes for longer files...</div>
+            <div class="progress-bar">
+                <div class="progress-bar-fill"></div>
+            </div>
+            <div class="progress-text">Processing...</div>
+        </div>
+
+        <div id="analysisHistory"></div>
+    </div>
+
+    <!-- Template for analysis results -->
+    <template id="analysisTemplate">
+        <div class="analysis-container">
+            <h3>Analysis for <span class="filename"></span></h3>
+            <p>Timestamp: <span class="timestamp"></span></p>
+            <div class="plot-container"></div>
+            <h4>Reactive Lines</h4>
+            <table class="reactive-lines">
+                <thead>
+                    <tr>
+                        <th>Start Time</th>
+                        <th>End Time</th>
+                        <th>Text</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+            <button class="remove-analysis">Remove</button>
+        </div>
+    </template>
+
+    <script>
+        const MAX_FILE_SIZE = 30 * 1024 * 1024; // 16MB
+        const TIMEOUT = 300000; // 5 minutes timeout
+
+        document.getElementById('speechFile').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            const fileInfo = document.getElementById('fileInfo');
+            
+            if (file.size > MAX_FILE_SIZE) {
+                fileInfo.textContent = 'File is too large. Maximum size is 16MB.';
+                e.target.value = '';
+                return;
+            }
+            
+            fileInfo.textContent = `Selected file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB)`;
+        });
+
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('speechFile');
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // Show loading indicator
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            const progressBar = loadingIndicator.querySelector('.progress-bar-fill');
+            const progressText = loadingIndicator.querySelector('.progress-text');
+            loadingIndicator.style.display = 'block';
+            
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), TIMEOUT);
+
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    body: formData,
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeoutId);
+
+                const data = await response.json();
+                if (response.ok) {
+                    addAnalysis(data);
+                    fileInput.value = '';
+                    document.getElementById('fileInfo').textContent = '';
+                } else {
+                    alert(data.error || 'An error occurred');
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    alert('Analysis took too long. Please try with a shorter audio file.');
+                } else {
+                    alert('Error analyzing speech: ' + error.message);
+                }
+            } finally {
+                loadingIndicator.style.display = 'none';
+                progressBar.style.width = '0%';
+                progressText.textContent = 'Processing...';
+            }
+        });
+
+        function addAnalysis(data) {
+            const template = document.getElementById('analysisTemplate');
+            const analysisHistory = document.getElementById('analysisHistory');
+            
+            // Clone the template
+            const analysis = template.content.cloneNode(true);
+            const container = analysis.querySelector('.analysis-container');
+            
+            // Set filename and timestamp
+            container.querySelector('.filename').textContent = data.filename;
+            container.querySelector('.timestamp').textContent = data.timestamp;
+            
+            // Populate table
+            const tbody = container.querySelector('.reactive-lines tbody');
+            data.reactive_lines.forEach(line => {
+                const row = tbody.insertRow();
+                row.insertCell(0).textContent = line.start;
+                row.insertCell(1).textContent = line.end;
+                row.insertCell(2).textContent = line.text;
+            });
+
+            // Create plot
+            const plotContainer = container.querySelector('.plot-container');
+            const times = data.intervals.map(interval => (interval[0] + interval[1]) / 2);
+            const trace = {
+                x: times,
+                y: data.intensities,
+                mode: 'lines+markers',
+                type: 'scatter',
+                name: 'Audience Reaction Intensity'
+            };
+
+            const layout = {
+                title: 'Audience Reaction Intensity Over Time',
+                xaxis: { title: 'Time (seconds)' },
+                yaxis: { title: 'Intensity' }
+            };
+
+            // Add remove button functionality
+            container.querySelector('.remove-analysis').addEventListener('click', () => {
+                container.remove();
+            });
+
+            // Add the new analysis to the history
+            analysisHistory.appendChild(container);
+            
+            // Create the plot after the container is in the DOM
+            Plotly.newPlot(plotContainer, [trace], layout);
+        }
+    </script>
+</body>
+</html>
