@@ -1,22 +1,26 @@
 from flask import Flask, render_template, request, jsonify, session
-from speech import get_intervals, detect_clapping_cheering, calculate_intensities, get_reactive_lines, transcribe_large_audio
+from speech import get_intervals, detect_clapping_cheering, calculate_intensities, get_reactive_lines, transcribe_audio_with_reaction_focus
 from waitress import serve
 import os
 from werkzeug.utils import secure_filename
 import tempfile
 from pydub import AudioSegment
-import librosa
 import json
 from datetime import datetime
 import threading
 from functools import partial
+import librosa
+import logging
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
-app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024  # 16MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 60 * 1024 * 1024  # 60MB max file size
 app.secret_key = 'aK8xs#p2Qn9v$mL5'
 
 ALLOWED_EXTENSIONS = {'mp3', 'wav'}
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -57,27 +61,37 @@ def process_audio(filepath, filename):
 
         # Only transcribe portions with reactions to save time
         print("Starting transcription...")
-        transcript = transcribe_large_audio(filepath)
+        transcript = transcribe_audio_with_reaction_focus(filepath, intervals)
         print("Transcription complete.")
 
         print("Extracting reactive lines...")
         reactive_lines = get_reactive_lines(transcript, intervals)
-        print("Reactive lines extracted.")
+        print(f"Raw reactive lines: {reactive_lines}")  # Debug print
 
-        # Clean up
+        # Clean upS
         os.remove(filepath)
         print("Temporary file cleaned up.")
 
-        # Prepare results
+        # Keep timestamps in original format
+        processed_reactive_lines = [
+            {
+                'start': start,  # Keep original timestamp string
+                'end': end,      # Keep original timestamp string
+                'text': text
+            }
+            for start, end, text in reactive_lines
+        ]
+
         results = {
             'filename': filename,
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'reactive_lines': [{'start': start, 'end': end, 'text': text} 
-                             for start, end, text in reactive_lines],
+            'reactive_lines': processed_reactive_lines,
             'intervals': [[float(start), float(end)] for start, end in intervals],
             'intensities': intensities,
             'status': 'complete'
         }
+        
+        print("Processed results:", json.dumps(results, indent=2))  # Debug print
         print("Audio processing complete.")
         
         return results
@@ -88,7 +102,8 @@ def process_audio(filepath, filename):
 
 @app.route("/analyze", methods=['POST'])
 def analyze_speech():
-    print("Received request to /analyze endpoint.")
+    logging.debug("Received request to /analyze endpoint.")
+    logging.debug(f"Max content length set to: {app.config['MAX_CONTENT_LENGTH']} bytes")
     if 'file' not in request.files:
         print("No file part in request.")
         return jsonify({'error': 'No file part'}), 400
@@ -111,8 +126,7 @@ def analyze_speech():
             if 'error' in results:
                 print(f"Error in results: {results['error']}")
                 return jsonify({'error': results['error']}), 500
-                
-            print("Returning analysis results.")
+            
             return jsonify(results)
             
         except Exception as e:

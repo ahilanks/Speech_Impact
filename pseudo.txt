@@ -1,0 +1,8 @@
+combine all files into one
+
+Steps of Local Process
+1. Main runs and webscrapes speeches by certian politician and stores on device locally.
+2. Then server.py runs to take thos analytics and display them on the localhost.
+    - Each speech you can click into: speech(clickable), location, date, duration, overall performance
+    - Geographic Map using location of name
+    - Bar charts using topics_analysis.csv

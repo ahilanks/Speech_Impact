@@ -1,2 +1,10 @@
 .venv
 .env
+node_modules
+.DS_Store
+*.wav
+__pycache__/
+build/
+dist/
+.cache/
+speech.wav

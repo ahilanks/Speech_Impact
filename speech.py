@@ -5,7 +5,7 @@ import os
 import numpy as np
 import pandas as pd
 import librosa
-#import tensorflow as tf
+import tensorflow as tf
 import tensorflow_hub as hub
 from pydub import AudioSegment
 import sys
@@ -13,6 +13,10 @@ from openai import OpenAI
 import matplotlib.pyplot as plt
 from scipy.interpolate import make_interp_spline
 import re
+from nltk.tokenize import sent_tokenize
+import nltk
+nltk.download('punkt')  # Download the punkt tokenizer data
+nltk.download('punkt_tab') 
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("API_KEY"))
@@ -170,12 +174,12 @@ def transcribe_chunk(chunk, chunk_index):
     
     with open(chunk_filename, "rb") as audio_file:
         transcription = client.audio.transcriptions.create(
-            model="whisper-1", 
+            model="gpt-4o-transcribe", 
             file=audio_file,
-            response_format="verbose_json"
+            response_format="json"
         )
     os.remove(chunk_filename)  # Clean up the temporary file
-    return transcription
+    return transcription.text
 
 def transcribe_large_audio(file_path, chunk_length_ms=60000):
     """Transcribe a large audio file by splitting it into smaller chunks."""
@@ -190,29 +194,183 @@ def transcribe_large_audio(file_path, chunk_length_ms=60000):
         
         # Offset each segment by the chunk start time
         chunk_start_time = (i * chunk_length_ms) / 1000  # Convert ms to seconds
-        for segment in chunk_transcription.segments:
-            segment.start += chunk_start_time
-            segment.end += chunk_start_time
+        for segment in chunk_transcription['segments']:
+            segment['start'] += chunk_start_time 
+            segment['end'] += chunk_start_time
             full_transcript['segments'].append(segment)
     
     return full_transcript
 
+def process_transcript_to_sentences(transcript):
+    """Convert transcript segments into sentences with timing information."""
+    # Combine all text first
+    full_text = ' '.join(segment['text'] for segment in transcript['segments'])
+    sentences = sent_tokenize(full_text)
+    
+    sentence_timings = []
+    current_pos = 0
+    
+    for sentence in sentences:
+        sentence_start = None
+        sentence_end = None
+        
+        # Find the segments that contain this sentence
+        for segment in transcript['segments']:
+            segment_text = segment['text']
+            if sentence in segment_text:
+                # Found exact match
+                sentence_start = segment['start']
+                sentence_end = segment['end']
+                break
+            
+            # Handle cases where sentence spans multiple segments
+            segment_pos = segment_text.find(sentence[current_pos:])
+            if segment_pos != -1:
+                if sentence_start is None:
+                    sentence_start = segment['start']
+                sentence_end = segment['end']
+                current_pos += len(segment_text)
+        
+        if sentence_start is not None and sentence_end is not None:
+            sentence_timings.append({
+                'text': sentence.strip(),
+                'start': sentence_start,
+                'end': sentence_end
+            })
+    
+    return sentence_timings
+
 def get_reactive_lines(transcript, intervals):
-    """Overlay intervals of reactions onto the transcript to get corresponding lines."""
-    reactive_lines = []
+    """
+    Overlay intervals of reactions onto the transcript sentences to get corresponding lines.
+    Each returned element in reactive_lines is a tuple of:
+       (start_time_str, end_time_str, text)
 
-    for segment in transcript['segments']:
-        segment_start = segment.start
-        segment_end = segment.end
-        text = segment.text
+    Where 'text' includes up to 3 pre-context lines (skipping any with "thank you"),
+    the current line with the clapping portion bolded, and 1 post-context line (again skipping any "thank you").
+    """
+    # Regex pattern for variations of "thank you"
+    thank_you_pattern = re.compile(r'\b(thank you|thanks|thank you very much|thank you so much)\b', re.IGNORECASE)
 
-        # Check if segment overlaps with any reaction interval
-        for (start, end) in intervals:
-            if (segment_start <= end) and (segment_end >= start):
-                reactive_lines.append((format_time(segment_start), format_time(segment_end), text))
+    # Convert transcript into sentences (assuming you already have this helper)
+    # Each sentence is a dict like: {'start': float, 'end': float, 'text': str}
+    sentences = process_transcript_to_sentences(transcript)
+
+    reactive_lines = []  # will hold tuples: (start_time_str, end_time_str, text_block)
+
+    # Keep track of processed sentence indices to avoid duplicates
+    processed_indices = set()
+
+    def bold_overlap(text, sent_start, sent_end, clap_start, clap_end):
+        """
+        Bold the portion of `text` that overlaps [clap_start, clap_end].
+        Uses fraction-of-duration approach to map times to word indices.
+        """
+        words = text.split()
+        duration = sent_end - sent_start
+        if duration <= 0:
+            return text  # avoid division by zero or negative durations
+
+        # Helper to map a time to a word index
+        def time_to_word_index(t):
+            fraction = (t - sent_start) / duration
+            fraction = max(0.0, min(fraction, 1.0))  # clamp to [0,1]
+            return int(len(words) * fraction)
+
+        start_idx = time_to_word_index(clap_start)
+        end_idx   = time_to_word_index(clap_end)
+        if start_idx > end_idx:
+            start_idx, end_idx = end_idx, start_idx
+
+        for i in range(start_idx, min(end_idx, len(words))):
+            words[i] = f"**{words[i]}**"
+
+        return " ".join(words)
+
+    # Check each sentence to see if it overlaps with any clapping interval
+    for i, sentence in enumerate(sentences):
+        sent_start = sentence['start']
+        sent_end   = sentence['end']
+        sent_text  = sentence['text']
+
+        # Skip if the sentence contains "thank you"
+        if thank_you_pattern.search(sent_text):
+            continue
+
+        # Check for overlap with any of the given intervals
+        for (clap_start, clap_end) in intervals:
+            # Overlap occurs if they are not disjoint
+            if not (sent_end < clap_start or sent_start > clap_end):
+                # If we haven't processed this sentence yet, build the context
+                if i not in processed_indices:
+                    processed_indices.add(i)
+
+                    # -------------------
+                    # 1) Collect up to 2 previous lines (skipping those with "thank you")
+                    # -------------------
+                    pre_context = []
+                    needed = 2
+                    j = i - 1
+                    while j >= 0 and needed > 0:
+                        txt_j = sentences[j]['text']
+                        if not thank_you_pattern.search(txt_j):
+                            pre_context.append(txt_j)
+                            needed -= 1
+                        j -= 1
+                    pre_context.reverse()  # because we collected backwards
+
+                    # -------------------
+                    # 2) Bold the overlap in this sentence
+                    # -------------------
+                    bolded_text = bold_overlap(
+                        sent_text,
+                        sent_start,
+                        sent_end,
+                        clap_start,
+                        clap_end
+                    )
+
+                    # -------------------
+                    # 3) Grab 1 post context line (skip if "thank you")
+                    # -------------------
+                    post_context = ""
+                    if i + 1 < len(sentences):
+                        next_text = sentences[i+1]['text']
+                        if not thank_you_pattern.search(next_text):
+                            post_context = next_text
+
+                    # -------------------
+                    # 4) Merge everything into one string
+                    # -------------------
+                    # Example format (you can change the parentheses/text):
+                    #   "Pre-line1. Pre-line2. Pre-line3 (Pre-context). bolded_text (Clapping overlap). (Post-context) post_line"
+                    final_text = ""
+
+                    if pre_context:
+                        final_text += " ".join(pre_context) + " "  # Join pre_context into a single string
+
+                    # Current line
+                    final_text += bolded_text + " "  # Add a space for separation
+
+                    # Post context if present
+                    if post_context:
+                        final_text += post_context
+
+                    # -------------------
+                    # 5) Append to the results as a 3-tuple
+                    # -------------------
+                    reactive_lines.append((
+                        format_time(sent_start),
+                        format_time(sent_end),
+                        final_text.strip()  # Strip to remove any trailing spaces
+                    ))
+
+                # Once we handle one interval overlap for sentence i,
+                # we break so we don't add it again for a second overlap
                 break
 
     return reactive_lines
+
 
 def plot_intensities_over_time(intervals, intensities, speech_name):
 
@@ -256,10 +414,11 @@ def main(filename):
     # Transcribe large audio
     transcript = transcribe_large_audio(wav_filename, chunk_length_ms)
 
-    # Print combined transcript with timestamps
-    print("Combined Transcription with Timestamps:")
-    for segment in transcript['segments']:
-        print(f"[{segment.start:.2f}s - {segment.end:.2f}s]: {segment.text}")
+    # Print combined transcript with timestamps by sentences
+    print("Combined Transcription with Timestamps (by sentences):")
+    sentences = process_transcript_to_sentences(transcript)
+    for sentence in sentences:
+        print(f"[{sentence['start']:.2f}s - {sentence['end']:.2f}s]: {sentence['text']}")
 
     # Step 3: Load the audio, detect clapping/cheering intervals, and calculate intensities
     y, sr = load_audio(wav_filename)
@@ -279,7 +438,7 @@ def main(filename):
     plot_intensities_over_time(intervals, intensities, re.search(r"/([^/]+)\.mp3$", file).group(1))
 
 if __name__ == "__main__":
-    mp3_filename_s = '/Users/ahilankaruppusami/Downloads/barackobama2004dncARXE-[AudioTrimmer.com].mp3'
+    mp3_filename_s = '/Users/ahilankaruppusami/Downloads/khanna town hall.mp3'
     mp3_filename_l = "/Users/ahilankaruppusami/Downloads/barackobama2004dncARXE.mp3"
     mp3_filename_n = "/Users/ahilankaruppusami/Coding_Projects/Measuring Speech Impact/ObamaSpeeches/Address to the Illinois General Assembly.mp3"
     main(mp3_filename_s)
