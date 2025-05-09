@@ -51,6 +51,36 @@ const PlayButtonOverlay = styled.div`
   z-index: 20;
 `;
 
+const SpeedControlContainer = styled.div`
+  position: absolute;
+  top: 20px;
+  left: 70px;
+  z-index: 20;
+`;
+
+const SpeedToggleButton = styled.button`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(30, 30, 30, 0.8);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  
+  &:hover {
+    background-color: rgba(40, 40, 40, 0.9);
+  }
+  
+  span {
+    color: ${props => props.active ? 'var(--primary)' : 'white'};
+  }
+`;
+
 const PlayButton = styled.button`
   display: flex;
   align-items: center;
@@ -88,7 +118,9 @@ const VisualizationBar = ({
   duration, 
   onTimeChange,
   isPlaying,
-  onPlayPause 
+  onPlayPause,
+  playbackSpeed,
+  onSpeedChange 
 }) => {
   const containerRef = useRef(null);
   const svgRef = useRef(null);
@@ -216,6 +248,16 @@ const VisualizationBar = ({
     markerRef.current.style.left = `${position}px`;
   }, [currentTime, duration]);
   
+  // Define available speeds
+  const availableSpeeds = [0.75, 1, 1.25, 1.5, 1.75, 2];
+  
+  // Handle cycling through speeds
+  const cycleSpeed = () => {
+    const currentIndex = availableSpeeds.indexOf(playbackSpeed);
+    const nextIndex = (currentIndex + 1) % availableSpeeds.length;
+    onSpeedChange(availableSpeeds[nextIndex]);
+  };
+
   // Format time as MM:SS
   const formatTime = (timeInSeconds) => {
     const minutes = Math.floor(timeInSeconds / 60);
@@ -242,6 +284,15 @@ const VisualizationBar = ({
           )}
         </PlayButton>
       </PlayButtonOverlay>
+      
+      <SpeedControlContainer>
+        <SpeedToggleButton 
+          onClick={cycleSpeed} 
+          title="Change playback speed"
+        >
+          <span>{playbackSpeed}x</span>
+        </SpeedToggleButton>
+      </SpeedControlContainer>
       
       <TimeDisplay>
         {formatTime(currentTime)} / {formatTime(duration)}

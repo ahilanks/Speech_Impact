@@ -65,6 +65,7 @@ const App = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
   const [audioError, setAudioError] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   
   const audioRef = useRef(null);
   
@@ -144,6 +145,14 @@ const App = () => {
       togglePlay();
     }
   };
+  
+  // Handle playback speed change
+  const handleSpeedChange = (speed) => {
+    if (audioRef.current) {
+      audioRef.current.playbackRate = speed;
+      setPlaybackSpeed(speed);
+    }
+  };
 
   return (
     <AppContainer>
@@ -180,6 +189,8 @@ const App = () => {
         onTimeChange={handleSeek}
         isPlaying={isPlaying}
         onPlayPause={togglePlay}
+        playbackSpeed={playbackSpeed}
+        onSpeedChange={handleSpeedChange}
       />
       
       <SectionTitle>Notable Reactions</SectionTitle>
